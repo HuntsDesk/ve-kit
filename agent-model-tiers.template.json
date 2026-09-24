@@ -1,0 +1,63 @@
+{
+  "$comment": [
+    "TIER MANIFEST for .claude/agents/*.md — the source of truth for BOTH the preferred",
+    "(rubric) model+effort of every agent and the degraded-capacity fallback.",
+    "",
+    "Copy this file to .claude/agent-model-tiers.json and give EVERY agent file an entry.",
+    "agent-model-tier.py refuses to run until the manifest and .claude/agents/ agree in",
+    "both directions — an agent with no entry, or an entry with no file, is an error, not",
+    "a skip.",
+    "",
+    "WHY THIS FILE EXISTS. It records every agent's model + effort in one reviewed place,",
+    "and `agent-model-tier.py check` goes red the moment a file and the manifest disagree.",
+    "If you change an agent's tier by hand, change it here in the same commit.",
+    "",
+    "DEFAULTS. Every agent runs `opus` (an ALIAS, never a dated id) with an EXPLICIT effort.",
+    "An omitted effort inherits the launching session, whose default is the MODEL's default",
+    "-- `medium` on Opus 5.5 (code.claude.com/docs/en/model-config) -- so no entry uses null.",
+    "`high` for document-shaped work; `xhigh` where the deliverable is a decision, diagnosis",
+    "or gate verdict (the review gate and test runner among them); `max` only on a measured gain.",
+    "",
+    "THE FALLBACK COLUMN SHIPS IDENTICAL TO `preferred`, so `apply fallback` changes nothing",
+    "until you configure it. If your plan has a per-model quota, you MAY record a cheaper",
+    "model per agent here as a capacity escape. Then the flip is mechanical but the RESTORE",
+    "is not: an LLM re-deriving 'which agents go back' later produces a plausible roster",
+    "with no error anywhere, so the restore reads from THIS FILE, never from re-derivation.",
+    "",
+    "AUTHORITY. skills/_shared/review-checklist.md 'Model + effort rubric' stays",
+    "authoritative for `preferred`. This file RECORDS that rubric's output plus a fallback",
+    "column; it does not override it. A rubric change means editing both, same commit.",
+    "",
+    "THE FALLBACK IS NOT A RE-TIERING. `preferred` is untouched by a fallback and is what",
+    "the roster returns to. Do not cite `mode: fallback` as evidence the rubric changed.",
+    "",
+    "USAGE: agent-model-tier.py {status|check|apply preferred|apply fallback} [--tier N] [--dry-run]"
+  ],
+  "mode": "preferred",
+  "mode_set_at": "<YYYY-MM-DD>",
+  "mode_set_by": "<WHO DECIDED, AND HOW — e.g. 'founder, quota alert'>",
+  "mode_reason": "<WHY THE CURRENT MODE IS IN EFFECT — for `preferred`: 'normal operation'>",
+  "restore_when": "<THE CONDITION THAT ENDS A FALLBACK — e.g. 'weekly quota resets, or enough frees up to restore tier 1'. Partial budget: restore by ascending restore_tier (`apply preferred --tier N`), verifying each step with `check --mode preferred --tier N`.>",
+  "fallback_effort_policy": {
+    "rule": "PRESERVE the preferred effort on the fallback model unless a reviewed exception below says otherwise. Nothing else moves.",
+    "why_preserve_is_the_default": "Without a measurement that a higher effort on the fallback model beats the preferred effort, the standing discipline is 'start high, raise only on measured gain'. Blanket-promoting agents burns the fallback model's headroom on a hunch.",
+    "exceptions": {
+      "$comment": "Empty until you configure a fallback model. Record any agent whose effort you deliberately change on the fallback, and why -- e.g. an effort held down on the preferred model only because of a mechanism specific to that model."
+    },
+    "reviewed_and_left_alone": "<LIST OR DESCRIBE the agents you reviewed and deliberately kept at their preferred effort, so the next reader knows it was a decision, not an omission.>"
+  },
+  "restore_tiers": {
+    "1": "Irreversible or fleet-wide blast radius: orchestration, the review gate, money/auth, schema, prod-state mutation, any production kill-switch. Restore these first on any partial budget.",
+    "2": "Cross-system diagnosis and user-facing content authoring. A wrong root cause sends real work down the wrong path; wrong content ships to users, but offline and reviewable.",
+    "3": "Product-domain and long-prose specialists. Prose quality degrades least on the fallback model; restore last."
+  },
+  "excluded": {
+    "$comment": "Files that carry a model pin OUTSIDE .claude/agents/ (a worker compose file, a CLI wrapper) and must NOT be flipped by a fallback sweep. Key = path, value = why. Empty until you have one."
+  },
+  "agents": {
+    "code-reviewer": { "preferred": { "model": "opus", "effort": "xhigh" }, "fallback": { "model": "opus", "effort": "xhigh" }, "restore_tier": 1 },
+    "test-runner": { "preferred": { "model": "opus", "effort": "xhigh" }, "fallback": { "model": "opus", "effort": "xhigh" }, "restore_tier": 1 },
+    "processor": { "preferred": { "model": "opus", "effort": "high" }, "fallback": { "model": "opus", "effort": "high" }, "restore_tier": 3 },
+    "<EVERY-OTHER-AGENT-FILE-STEM>": { "preferred": { "model": "opus", "effort": "high" }, "fallback": { "model": "opus", "effort": "high" }, "restore_tier": 2 }
+  }
+}
