@@ -1,0 +1,265 @@
+# gates -- prove, on every push, that the hooks this kit ships actually fire.
+#
+# The hooks and their test suites are not loose files in this repo: they are fenced
+# templates inside 01-BOOTSTRAP.md, written into YOUR project by the bootstrap agent.
+# So this workflow does what a new user's machine does: extract them into a scratch
+# git project, register them, and run doctor.sh over the result.
+#
+# What a green run means: on a clean Ubuntu runner AND a clean macOS runner, every
+# hook extracted from this commit's 01-BOOTSTRAP.md is executable and registered by
+# this commit's Phase 6 settings.json, and every shipped test-*.sh suite passed.
+# Every shipped hook has a suite (since 2026-09-21; before that, four did not, and
+# for those green proved only "installed and registered"). What it does NOT mean:
+# a suite drives a hook with synthetic input. It shows the hook decides correctly;
+# it cannot show that an agent then acts on a reminder or answers a checklist
+# honestly -- stop-compliance-check, session-handoff and post-compact-recovery are
+# nudges, and their suites say so.
+#
+# Both OSes run every suite; none is dropped on either. macOS is not optional: the
+# protected-files suite once caught a macOS-only `realpath` bug that Linux never sees.
+name: gates
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gates-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Pinned, and verified against the sha256 values below -- not against a checksum file
+  # fetched from the same place as the tarball. Bump all four together, from
+  # https://github.com/gitleaks/gitleaks/releases (gitleaks_<version>_checksums.txt).
+  GITLEAKS_VERSION: "8.30.1"
+  GITLEAKS_SHA256_LINUX_X64: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+  GITLEAKS_SHA256_DARWIN_ARM64: "b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5"
+  GITLEAKS_SHA256_DARWIN_X64: "dfe101a4db2255fc85120ac7f3d25e4342c3c20cf749f2c20a18081af1952709"
+  # The telemetry-ingest suite drives the Vibe Board package (02-VIBE-BOARD.md). Pinned to
+  # a commit so a push there cannot change what this build executes. Bump it when the
+  # kit's test-telemetry-ingest.sh is updated for a newer package release.
+  VIBE_BOARD_REPO: "https://github.com/HuntsDesk/ve-vibe-board.git"
+  VIBE_BOARD_REF: "640a5aee867945845e25f7753d6bd15b4cf4f00d"  # ve-vibe-board 2.2.1 (hardened ingest)
+
+jobs:
+  suites:
+    name: hook suites (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      # Actions are pinned to a full commit SHA (a tag can be moved; a SHA cannot). The
+      # trailing comment is the release that SHA was on when it was pinned -- re-verify with
+      # `gh api repos/actions/<name>/git/ref/tags/<tag>` when bumping.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+
+      - name: Script syntax
+        run: |
+          set -euo pipefail
+          bash -n doctor.sh
+          bash -n init.sh
+          python3 -c "import ast,sys; [ast.parse(open(f).read(), f) for f in sys.argv[1:]]" extract-hooks.py agent-model-tier.py merge-user-settings.py
+
+      - name: doctor.sh's hook roster == the hooks 01-BOOTSTRAP.md ships (both directions)
+        run: |
+          set -euo pipefail
+          # doctor.sh checks the hooks in its own table. A hook added to the bootstrap and
+          # not to that table would never be checked, and everything below would stay green.
+          bash doctor.sh --self-check
+
+      - name: Install gitleaks (pinned version, pinned sha256)
+        run: |
+          set -euo pipefail
+          case "${RUNNER_OS}-${RUNNER_ARCH}" in
+            Linux-X64)   ASSET="linux_x64";    WANT="${GITLEAKS_SHA256_LINUX_X64}" ;;
+            macOS-ARM64) ASSET="darwin_arm64"; WANT="${GITLEAKS_SHA256_DARWIN_ARM64}" ;;
+            macOS-X64)   ASSET="darwin_x64";   WANT="${GITLEAKS_SHA256_DARWIN_X64}" ;;
+            *) echo "::error::no pinned gitleaks checksum for ${RUNNER_OS}-${RUNNER_ARCH}"; exit 1 ;;
+          esac
+          TARBALL="gitleaks_${GITLEAKS_VERSION}_${ASSET}.tar.gz"
+          cd "${RUNNER_TEMP}"
+          curl -fsSL -o "${TARBALL}" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${TARBALL}"
+          echo "${WANT}  ${TARBALL}" | shasum -a 256 -c -
+          mkdir -p "${RUNNER_TEMP}/bin"
+          tar -xzf "${TARBALL}" -C "${RUNNER_TEMP}/bin" gitleaks
+          echo "${RUNNER_TEMP}/bin" >> "${GITHUB_PATH}"
+          "${RUNNER_TEMP}/bin/gitleaks" version
+
+      - name: Extract hooks + suites + settings.json into a scratch git project
+        run: |
+          set -euo pipefail
+          PROJ="${RUNNER_TEMP}/scratch-project"
+          mkdir -p "${PROJ}"
+          git -C "${PROJ}" init -q
+          git config --global user.email "ci@example.invalid"
+          git config --global user.name "gates-ci"
+          # Fails loudly (non-zero, named reason) on an unterminated fence, a heading with
+          # no block, or fewer blocks than its floor -- it never writes a partial set.
+          python3 extract-hooks.py --project "${PROJ}" --settings
+          echo "PROJ=${PROJ}" >> "${GITHUB_ENV}"
+
+      - name: Clone + build the Vibe Board package (needed by test-telemetry-ingest.sh)
+        run: |
+          set -euo pipefail
+          git init -q "${PROJ}/ve-vibe-board"
+          cd "${PROJ}/ve-vibe-board"
+          git remote add origin "${VIBE_BOARD_REPO}"
+          git fetch -q --depth 1 origin "${VIBE_BOARD_REF}"
+          git checkout -q FETCH_HEAD
+          npm ci --no-audit --no-fund
+          npm run build
+          test -f dist/tools/gate-events.js
+
+      - name: doctor.sh --strict (installed + executable + registered + every suite passes)
+        run: |
+          set -euo pipefail
+          # --strict: a WARN or a SKIPPED is a failure here. On a runner that has python3,
+          # git, gitleaks, node and the built package, nothing has a reason to skip -- so a
+          # skip means a suite silently stopped running, which is the failure this catches.
+          bash doctor.sh --project "${PROJ}" --strict | tee "${RUNNER_TEMP}/doctor.out"
+
+      - name: Every shipped suite ran, by name (a suite that vanished is not a pass)
+        run: |
+          set -euo pipefail
+          WANT=$(python3 extract-hooks.py --list | awk -F'\t' '$1=="suite"{print $2}' | sed 's/\.sh$//' | sort)
+          GOT=$(grep -E '^SUITE_[^=]+=ok\(' "${RUNNER_TEMP}/doctor.out" | sed -E 's/^SUITE_([^=]+)=.*/\1/' | sort)
+          echo "expected:"; echo "${WANT}"; echo "ran ok:"; echo "${GOT}"
+          [ -n "${WANT}" ] && [ "${WANT}" = "${GOT}" ]
+
+      - name: Positive controls -- doctor.sh must go RED when something is broken
+        run: |
+          # The runner's shell is `bash -e`; these commands are EXPECTED to fail, so -e goes off
+          # and every outcome is checked by hand.
+          set +e; set -uo pipefail
+          expect_fail() {  # expect_fail <label> <KEY that must read FAIL> -- doctor must exit non-zero
+            local label="$1" key="$2" out rc
+            out=$(bash doctor.sh --project "${CTL}" --no-suites 2>&1); rc=$?
+            if [ "${rc}" -ne 0 ] && grep -q "^${key}=FAIL" <<<"${out}"; then echo "ok: ${label} -> exit ${rc}, ${key}=FAIL"
+            else echo "::error::positive control did not fire: ${label} (exit ${rc})"; echo "${out}"; exit 1; fi
+          }
+          fresh() { rm -rf "${CTL}"; mkdir -p "${CTL}"; git -C "${CTL}" init -q; python3 extract-hooks.py --project "${CTL}" --settings >/dev/null; }
+          CTL="${RUNNER_TEMP}/control-project"
+
+          fresh; rm "${CTL}/.claude/hooks/review-gate.sh"
+          expect_fail "required hook deleted" HOOK_review-gate
+
+          fresh; chmod -x "${CTL}/.claude/hooks/fact-gate.sh"
+          expect_fail "hook not executable" HOOK_fact-gate
+
+          fresh; python3 - "${CTL}/.claude/settings.json" <<'PY'
+          import json, sys
+          f = sys.argv[1]; d = json.load(open(f))
+          for g in d["hooks"]["PreToolUse"]:
+              g["hooks"] = [h for h in g["hooks"] if "protected-files-gate.sh" not in h["command"]]
+          json.dump(d, open(f, "w"), indent=2)
+          PY
+          expect_fail "registration removed" REG_protected-files-gate
+
+          fresh; rm "${CTL}/.claude/hooks/telemetry-ingest.sh"
+          expect_fail "optional hook registered but missing" HOOK_telemetry-ingest
+
+          # No Python at all: the state in which every hook silently fails open. doctor.sh
+          # must say PYTHON=FAIL, must NOT print ok for anything it could no longer check,
+          # and must exit non-zero. PATH is rebuilt from symlinks so nothing else changes.
+          fresh; STUB="${RUNNER_TEMP}/path-without-python"; rm -rf "${STUB}"; mkdir -p "${STUB}"
+          for tool in bash git awk sed grep head tail cat rm mkdir mktemp dirname basename sleep env wc tr sort; do
+            found=$(command -v "${tool}") && ln -s "${found}" "${STUB}/${tool}"
+          done
+          out=$(PATH="${STUB}" "${BASH}" doctor.sh --project "${CTL}" 2>&1); rc=$?
+          if [ "${rc}" -ne 0 ] && grep -q '^PYTHON=FAIL' <<<"${out}" && ! grep -qE '^(REG_|SUITE_)[^=]+=ok' <<<"${out}" \
+             && grep -q '^SUITE_test-review-gate=SKIPPED' <<<"${out}"; then
+            echo "ok: python hidden -> exit ${rc}, PYTHON=FAIL, no REG_/SUITE_ key claims ok"
+          else echo "::error::positive control did not fire: python hidden (exit ${rc})"; echo "${out}"; exit 1; fi
+
+      - name: Positive controls -- the roster self-check must go RED in BOTH directions
+        run: |
+          set +e; set -uo pipefail
+          ADDED="${RUNNER_TEMP}/bootstrap-plus-one.md"; GONE="${RUNNER_TEMP}/bootstrap-minus-one.md"
+          python3 - "${ADDED}" "${GONE}" <<'PY'
+          import sys
+          text = open("01-BOOTSTRAP.md", encoding="utf-8").read()
+          fence = "`" * 3
+          fake = "### File: `.claude/hooks/zz-fake.sh`\n\n" + fence + "bash\n#!/bin/bash\nexit 0\n" + fence + "\n\n"
+          anchor = "### File: `.claude/hooks/block-todowrite.sh`"
+          assert text.count(anchor) == 1
+          open(sys.argv[1], "w", encoding="utf-8").write(text.replace(anchor, fake + anchor))
+          gone = "### File: `.claude/hooks/post-compact-recovery.sh`"
+          assert text.count(gone) == 1
+          open(sys.argv[2], "w", encoding="utf-8").write(text.replace(gone, "### (heading removed by the positive control)"))
+          PY
+          [ $? -eq 0 ] || { echo "::error::could not build the mutated bootstrap copies"; exit 1; }
+
+          out=$(bash doctor.sh --self-check --bootstrap "${ADDED}" 2>&1); rc=$?
+          echo "${out}"
+          if [ "${rc}" -eq 1 ] && grep -q '^TABLE_VS_BOOTSTRAP=FAIL' <<<"${out}" && grep -q "NOT in doctor's table.*zz-fake.sh" <<<"${out}"; then
+            echo "ok: a 12th hook in the bootstrap -> exit 1, names zz-fake.sh"
+          else echo "::error::self-check did not catch a hook ADDED to the bootstrap (exit ${rc})"; exit 1; fi
+
+          out=$(bash doctor.sh --self-check --bootstrap "${GONE}" 2>&1); rc=$?
+          echo "${out}"
+          if [ "${rc}" -eq 1 ] && grep -q '^TABLE_VS_BOOTSTRAP=FAIL' <<<"${out}" && grep -q "NOT shipped by.*post-compact-recovery.sh" <<<"${out}"; then
+            echo "ok: a hook removed from the bootstrap -> exit 1, names post-compact-recovery.sh"
+          else echo "::error::self-check did not catch a hook REMOVED from the bootstrap (exit ${rc})"; exit 1; fi
+
+          # Third direction: the hook is still shipped but its SUITE is gone. Without this
+          # "every hook ships a suite" would be a sentence, not a check.
+          NOSUITE="${RUNNER_TEMP}/bootstrap-minus-suite.md"
+          python3 - "${NOSUITE}" <<'PY'
+          import sys
+          text = open("01-BOOTSTRAP.md", encoding="utf-8").read()
+          gone = "### File: `.claude/hooks/test-stop-hook.sh`"
+          assert text.count(gone) == 1
+          open(sys.argv[1], "w", encoding="utf-8").write(text.replace(gone, "### (suite heading removed by the positive control)"))
+          PY
+          [ $? -eq 0 ] || { echo "::error::could not build the suite-less bootstrap copy"; exit 1; }
+          out=$(bash doctor.sh --self-check --bootstrap "${NOSUITE}" 2>&1); rc=$?
+          echo "${out}"
+          if [ "${rc}" -eq 1 ] && grep -q '^TABLE_VS_BOOTSTRAP=FAIL' <<<"${out}" && grep -q "suite is NOT shipped.*stop-compliance-check.sh(test-stop-hook.sh)" <<<"${out}"; then
+            echo "ok: a hook whose suite was removed -> exit 1, names stop-compliance-check.sh and test-stop-hook.sh"
+          else echo "::error::self-check did not catch a hook whose SUITE was removed (exit ${rc})"; exit 1; fi
+
+      - name: Positive control -- a HUNG suite is a FAIL, not "could not run"
+        run: |
+          set +e; set -uo pipefail
+          HUNG="${RUNNER_TEMP}/hung-project"; rm -rf "${HUNG}"; mkdir -p "${HUNG}"; git -C "${HUNG}" init -q
+          python3 extract-hooks.py --project "${HUNG}" --settings >/dev/null
+          rm "${HUNG}"/.claude/hooks/test-*.sh
+          # Asserts nothing and never returns: before the fix this read as SKIPPED and exit 0.
+          printf '#!/bin/bash\nsleep 600\n' > "${HUNG}/.claude/hooks/test-zz-hang.sh"; chmod +x "${HUNG}/.claude/hooks/test-zz-hang.sh"
+          start=$(date +%s)
+          out=$(bash doctor.sh --project "${HUNG}" --suite-timeout 3 2>&1); rc=$?
+          took=$(( $(date +%s) - start ))
+          grep -E '^SUITE_|^DOCTOR=' <<<"${out}"
+          if [ "${rc}" -eq 1 ] && grep -q '^SUITE_test-zz-hang=FAIL(timed out after 3s' <<<"${out}" && [ "${took}" -lt 60 ]; then
+            echo "ok: hung suite -> exit 1, SUITE_test-zz-hang=FAIL(timed out), doctor returned in ${took}s"
+          else echo "::error::a hung suite was not reported as a timed-out FAIL (exit ${rc}, ${took}s)"; echo "${out}"; exit 1; fi
+
+      - name: Positive control -- the extractor must refuse a broken bootstrap
+        run: |
+          set +e; set -uo pipefail
+          BROKEN="${RUNNER_TEMP}/broken-bootstrap.md"
+          # Drop the LAST closing fence in the file: everything after it is now one
+          # unterminated block, which must be a named failure, never a short extraction.
+          python3 - "${BROKEN}" <<'PY'
+          import sys
+          lines = open("01-BOOTSTRAP.md", encoding="utf-8").read().split("\n")
+          last = max(i for i, l in enumerate(lines) if l.startswith("```"))
+          del lines[last]
+          open(sys.argv[1], "w", encoding="utf-8").write("\n".join(lines))
+          PY
+          out=$(python3 extract-hooks.py --bootstrap "${BROKEN}" --list 2>&1); rc=$?
+          echo "${out}" | tail -n 2
+          if [ "${rc}" -eq 0 ]; then echo "::error::extractor accepted a bootstrap with an unterminated fence"; exit 1; fi
+          grep -q "unterminated fence" <<<"${out}" || { echo "::error::extractor failed, but not for the planted reason"; exit 1; }
+          echo "ok: unterminated fence -> exit ${rc}"
