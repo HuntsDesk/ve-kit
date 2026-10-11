@@ -1,0 +1,141 @@
+# blast-radius.conf.example -- the project config for blast-radius.sh
+#
+# Copy to .claude/blast-radius.conf in your project, and copy the engine
+# (blast-radius.sh, beside this file in the kit) to scripts/blast-radius.sh.
+# Then turn on the directives that fit your repo by deleting the leading "#: ".
+#
+# As shipped, this file is a VALID, EMPTY config: only `version 1` and `end` are
+# active. With it the engine runs, every optional probe reports
+# KEY=SKIPPED(not configured: <directive>) and the three searches (IMPORTERS,
+# SYMBOLS, TABLES) are labelled UNCONTROLLED until you give them a positive
+# control. SKIPPED and UNCONTROLLED are never "none": they say the probe was not
+# run, or ran without proof that it can find anything.
+#
+# The engine FAILS CLOSED on this file. Absent, unreadable, a symlink (or under a
+# symlinked .claude/), no `version 1` first, no `end` last, content after `end`,
+# an unknown directive, a duplicated single-value directive, a malformed value or
+# an ERE that does not compile: every run prints PROBE_FAILED=config (<reason>)
+# and exits 2, and the fact-gate hook's probe reports that instead of a result.
+# Check it with:  bash scripts/blast-radius.sh --self-test
+#
+# Syntax: one directive per line, `<directive> <args...>`. Blank lines and lines
+# whose first non-blank character is `#` are ignored; CR line endings are
+# stripped.
+#   <path>  repo-relative, normalised (./, //, trailing /). Globs, `..` and
+#           absolute paths are refused.
+#   <glob>  a bash `case` pattern; `*` crosses `/`.
+#   <ERE>, <text>  the REST of the line (spaces allowed).
+# Every <file>/<path> a directive names goes through the same canonicalise-then-
+# refuse step as a --files input before it is read, scanned or run.
+#
+# Every example below is generic. Replace the paths with your own; none of them
+# needs to exist for --self-test, but a control or registry naming a missing
+# file fails that probe on a real run.
+
+version 1
+
+# -- paths the engine must never read ------------------------------------------
+# Refused on the canonical string before any lookup, and excluded from every
+# walker (git pathspecs, ripgrep --glob, ast-grep --globs), including through a
+# symlink. Case-insensitive. Use it for licensed or regulated material, vendored
+# secrets, customer data dumps. Never remove a line to "fix" a run.
+#: never_read vendor/licensed-content
+#: never_read data/customer-exports
+# A directory of this NAME at any depth:
+#: never_read_any private-fixtures
+# The key and noun printed when a path is refused (default NEVER_READ_REFUSED / never_read):
+#: never_read_report RESTRICTED_REFUSED restricted-area
+# Extra --self-test cases: <input> <want>, where <want> is a repo-relative path,
+# REFUSE, or OUTSIDE:<abs>. `<repo>` in <input> is the repo root. Every REFUSE
+# line is re-checked on every run, so it doubles as a pin on never_read.
+#: selftest_canon ./src//lib/../lib/api.ts src/lib/api.ts
+#: selftest_canon vendor/licensed-content/set-1/q.json REFUSE
+#: selftest_canon <repo>/./src/lib/api.ts src/lib/api.ts
+
+# -- search scope --------------------------------------------------------------
+# Where text searches run (default: the repo root):
+#: code_dirs src server scripts
+# One importer scope; also where the fe= reader counts come from:
+#: frontend_dirs src
+# <root>/<x>/... is its own importer scope (one build context per <x>):
+#: scope_root apps
+# A shared python dir, and the dirs searched for its importers:
+#: importers_py_shared apps/shared apps
+# A TS import alias: spec prefix -> directory:
+#: ts_alias @/ src/
+
+# -- positive controls (an empty result is a claim about the search) -----------
+# Name a file you KNOW imports / contains / reads the thing; the probe must find
+# it, or the run reports that probe as failed instead of "none".
+#: importers_ts_control src/pages/Home.tsx useSession Home.tsx imports useSession
+#: importers_py_control apps/api/main.py auth_check api main.py imports auth_check
+#: symbols_control src/pages/Home.tsx useSession
+#: tables_control \.from\([[:space:]]*['"]accounts['"] .from('accounts') in src
+
+# -- one-way doors (every matching line fires) ---------------------------------
+# A changed path matching any <glob> is labelled a one-way door: it cannot be
+# undone by reverting a commit.
+#: one_way migration migrations/* */migrations/*
+#: one_way ci_config .github/workflows/* */cloudbuild*.yaml
+#: one_way claude_settings .claude/settings*.json
+#: one_way claude_hooks .claude/hooks/*
+# Same, when a CHANGED LINE of a path matching <glob> matches <ERE> (case-insensitive):
+#: one_way_content rls * create[[:space:]]+policy|alter[[:space:]]+policy|row[[:space:]]+level[[:space:]]+security
+#: one_way_content grants *.sql ^[+-].*(grant|revoke)[[:space:]]
+
+# -- deploy triggers -----------------------------------------------------------
+# A snapshot of your CI trigger filters (they live in your CI system, not the
+# repo: re-derive them before trusting a verdict for a production push).
+# One output key per environment; `always` prints it even when empty,
+# `nonempty` only when something fired:
+#: trigger_env staging TRIGGERS_STAGING always
+#: trigger_env prod TRIGGERS_PROD always
+#: trigger_env manual TRIGGERS_MANUAL_ONLY nonempty
+# FIRST MATCH WINS, in file order. A line with no outputs matches, emits nothing
+# and stops (an explicit "fires nothing"):
+#: trigger docs/*
+#: trigger web/* staging:deploy-web-staging prod:deploy-web
+#: trigger admin/* manual:deploy-admin
+# <prefix><svc>/... for a listed <svc>; `<svc>` in a name is replaced. Takes part
+# in the same first-match order:
+#: trigger_svc apps/ api,worker staging:deploy-<svc>-staging prod:deploy-<svc>
+# A trigger with no path filter, appended as <name>(always):
+#: trigger_always prod ci-validate
+# Positive control: <path> must classify to include this output:
+#: trigger_control web/index.html prod:deploy-web
+# A note when a changed path matches (only when the trigger map evaluated):
+#: trigger_note ^apps/[^/]+/migrations/ a migration under a service redeploys it but applies no schema
+
+# -- notes, vendored copies, dual-access tables --------------------------------
+# A note when a changed path matches:
+#: note ^config/feature-flags\.json$ feature-flag snapshot changed: whoever owns flags reviews it
+# Byte-identical vendored copies. A registry file holding lines "canonical|copy|copy":
+#: vendored_registry scripts/vendored-copies.txt
+# ... or an inline entry:
+#: vendored lib/retry.py|apps/api/retry.py|apps/worker/retry.py
+# Run (full mode) when a registered copy changed:
+#: vendored_guard scripts/check-vendored-drift.sh
+# Tables read by the frontend directly AND by backend services. Either: the line
+# after <anchor text> in <file> lists `table` names, and fewer than <min> fails:
+#: dual_access_from docs/architecture/data-access.md 3 tables with dual access
+# ... or an inline list:
+#: dual_access accounts subscriptions invoices
+
+# -- feature flags -------------------------------------------------------------
+# A flag reference; the last quoted token of a match is the flag name:
+#: flag_re useFlag\([[:space:]]*['"][a-z0-9_-]+|isEnabled\([[:space:]]*['"][a-z0-9_-]+
+# A flag named through a constant:
+#: flag_const_re (useFlag\(|isEnabled\()[[:space:]]*[A-Z][A-Z0-9_]+
+
+# -- guards (full mode) --------------------------------------------------------
+# Run with --guards (needs ripgrep): a repo-wide invariant checker of your own.
+#: banned_guard scripts/check-invariants.sh
+
+# -- fact-gate hook ------------------------------------------------------------
+# Read by .claude/hooks/fact-gate.sh, not by the engine: the paths whose FIRST
+# edit in a session also runs `blast-radius.sh --brief`. Precedence: the
+# FACT_GATE_BLAST_RE env var, then this line, then the hook's generic default.
+# A Python regex (look-aheads allowed).
+#: fact_gate_blast_re (^|/)migrations/|\.sql$|(^|/)(auth|billing|payments?)/|^infra/|(^|/)Dockerfile$
+
+end
